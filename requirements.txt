@@ -4,4 +4,4 @@ click
 tqdm
 tabulate
 pandas
-sklearn
+scikit-learn
