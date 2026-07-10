@@ -24,7 +24,7 @@ def inference(fasta, weight, cuda):
     lines = open(fasta, "r").readlines()
     seq = lines[1].strip().upper()
     seq = "".join([_ if _ in "ACGU" else "N" for _ in seq])
-    vocab = np.full(128, -1, dtype=np.uint8)
+    vocab = np.full(128, -1, dtype=np.int16)
     vocab[np.array("NAUCG", "c").view(np.uint8)] = np.arange(len("NAUCG"))
     seq = vocab[np.array(seq, "c").view(np.uint8)]
     data = {"seq": torch.from_numpy(seq[None]).long()}
