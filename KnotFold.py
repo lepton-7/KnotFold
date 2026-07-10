@@ -7,6 +7,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from model.main_model import MainModel as Model
+from Bio.SeqIO import parse
+from pathlib import Path
+
 
 def load_model(chk_path):
     model = Model().eval()
@@ -18,6 +21,7 @@ def load_model(chk_path):
         parsed_dict[k] = v
     model.load_state_dict(parsed_dict)
     return model
+
 
 def inference(fasta, weight, cuda):
     model = load_model(os.path.join(os.path.dirname(__file__), weight))
@@ -43,19 +47,19 @@ def inference(fasta, weight, cuda):
 def predict(fasta, cuda):
     here = os.path.dirname(__file__)
     with tempfile.TemporaryDirectory() as d:
-        fgs = [[]for _ in range(5)]
+        fgs = [[] for _ in range(5)]
         for i in range(5):
-            weight = "weights/prior_"+str(i)+".pth"
+            weight = "weights/prior_" + str(i) + ".pth"
             fgs[i] = inference(fasta, weight, cuda)
         fg = np.mean(np.array(fgs, dtype=np.float64), axis=0)
         bg = inference(fasta, "weights/reference.pth", cuda)
-        with open(os.path.join(d, "prior.mat"), 'w') as fp:
+        with open(os.path.join(d, "prior.mat"), "w") as fp:
             for i in range(fg.shape[0]):
                 for j in range(fg.shape[0]):
                     fp.write("%.10f" % fg[i][j])
                     fp.write("\t")
                 fp.write("\n")
-        with open(os.path.join(d, "reference.mat"), 'w') as fp:
+        with open(os.path.join(d, "reference.mat"), "w") as fp:
             for i in range(bg.shape[0]):
                 for j in range(bg.shape[0]):
                     fp.write("%.10f" % bg[i][j])
@@ -73,26 +77,38 @@ def predict(fasta, cuda):
             pairs.append((int(l), int(r)))
     return pairs
 
+
 def write_bpseq(seq, pairs, outfile):
     bp = [-1 for _ in seq]
     for l, r in pairs:
-        bp[l-1] = r-1
-        bp[r-1] = l-1
+        bp[l - 1] = r - 1
+        bp[r - 1] = l - 1
     with open(outfile, "w") as fp:
         for i, k in enumerate(seq):
-            fp.write("%d %s %d\n" % (i+1, k, bp[i]+1))
+            fp.write("%d %s %d\n" % (i + 1, k, bp[i] + 1))
+
 
 @click.command()
-@click.option("-i", "--fasta", help="Input sequence (fasta format)", required=True)
-@click.option("-o", "--outdir", help="Output dictionary", default="./")
+@click.option("-i", "--fasta", help="Input sequence file (fasta format)", required=True)
+@click.option(
+    "-o",
+    "--outdir",
+    help="Output dictionary. A subdirectory will be made for sequences from the input sequence file",
+    default="./",
+)
 @click.option("--cuda", is_flag=True, default=True)
-
-
 def main(fasta, outdir, cuda):
+    fasta = Path(fasta)
+    out_sub = Path(outdir).joinpath(f"{fasta.stem}")
+    out_sub.mkdir(exist_ok=True, parents=True)
+
     task = open(fasta, "r").read().split("\n")
     name, seq = task[0][1:], task[1].strip()
     pairs = predict(fasta, cuda)
-    write_bpseq(seq, pairs, os.path.join(outdir, f"{name}.bpseq"))
+
+    out_file_path = out_sub.joinpath(f"{name}.bpseq")
+    write_bpseq(seq, pairs, out_file_path)
+
 
 if __name__ == "__main__":
     main()
