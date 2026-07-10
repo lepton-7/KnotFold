@@ -1,7 +1,12 @@
+import gc
 import os
+
+os.environ["PYTORCH_ALLOC_CONF"] = "garbage_collection_threshold:0.6"
+
 import sys
 import torch
 import click
+import pickle
 import tempfile
 import subprocess
 import numpy as np
@@ -38,11 +43,17 @@ class Perf:
     def __str__(self) -> str:
         assert self.inf_seq is not None
         assert self.inf_ref is not None
-        assert self.min_cost_flow is not None
+
+        mc_str = (
+            f"Structure flow algorithm: {self.min_cost_flow/1e6:,.3f} ms"
+            if self.min_cost_flow is not None
+            else f"Structure flow algorithm not run"
+        )
+
         return f"""Runtimes for {self.id} of length {self.slen}:
     Sequence inference: {self.inf_seq/1e6:,.3f} ms
     Reference inference: {self.inf_ref/1e6:,.3f} ms
-    Structure flow algorithm: {self.min_cost_flow/1e6:,.3f} ms"""
+    {mc_str}\n"""
 
 
 def load_model(chk_path):
@@ -76,44 +87,53 @@ def inference(seq: str, weight, cuda):
     return prob
 
 
-def predict(seq: str, cuda, t: Perf, out_sub: Path):
+def predict(seq: str, cuda, t: Perf, out_sub: Path, skip_struct: bool = True):
     here = os.path.dirname(__file__)
     id = t.id
 
     with tempfile.TemporaryDirectory() as d:
         fgs = [[] for _ in range(5)]
+
         ptime = perf_counter_ns()
         for i in range(5):
             weight = "weights/prior_" + str(i) + ".pth"
-            fgs[i] = inference(seq, weight, cuda)
+            fgs[i] = inference(seq, weight, cuda)  # type: ignore
         ptime = perf_counter_ns() - ptime
         t.inf_seq = ptime
 
         fg = np.mean(np.array(fgs, dtype=np.float64), axis=0)
+
         ptime = perf_counter_ns()
         bg = inference(seq, "weights/reference.pth", cuda)
         ptime = perf_counter_ns() - ptime
         t.inf_ref = ptime
 
-        bppath = out_sub.joinpath(f"{id}_prior.mat")
-        refpath = out_sub.joinpath(f"{id}_reference.mat")
-        with open(bppath, "w") as fp:
+        with open(os.path.join(d, "prior.mat"), "w") as fp:
             for i in range(fg.shape[0]):
                 for j in range(fg.shape[0]):
                     fp.write("%.10f" % fg[i][j])
                     fp.write("\t")
                 fp.write("\n")
-            print(f"Saved bp probabilities to {bppath}")
-
-        with open(refpath, "w") as fp:
+        with open(os.path.join(d, "reference.mat"), "w") as fp:
             for i in range(bg.shape[0]):
                 for j in range(bg.shape[0]):
                     fp.write("%.10f" % bg[i][j])
                     fp.write("\t")
                 fp.write("\n")
+
+        bppath = out_sub.joinpath(f"{id}_prior.p")
+        refpath = out_sub.joinpath(f"{id}_reference.p")
+        with open(bppath, "wb") as pick:
+            pickle.dump(fg, pick)
+            print(f"Saved bp probabilities to {bppath}")
+        with open(refpath, "wb") as pick:
+            pickle.dump(bg, pick)
             print(f"Saved reference probabilities to {refpath}")
 
-        mincostflowcmd = f"{here}/KnotFold_mincostflow {bppath} {refpath}"
+        if skip_struct:
+            return None, t
+
+        mincostflowcmd = f"{here}/KnotFold_mincostflow {d}/prior.mat {d}/reference.mat"
         ptime = perf_counter_ns()
         p = subprocess.run(mincostflowcmd, shell=True, capture_output=True)
         ptime = perf_counter_ns() - ptime
@@ -158,10 +178,25 @@ def main(fasta, outdir, cuda):
     for rec in parse(fasta, "fasta"):
         rec: SeqRecord
         name, seq = str(rec.id), str(rec.seq)
-        pairs, t = predict(seq, cuda, t=Perf(len(seq), name), out_sub=out_sub)
-        print(t)
-        out_file_path = out_sub.joinpath(f"{name}.bpseq")
-        write_bpseq(seq, pairs, out_file_path)
+        skip_struct = len(seq) > 300
+        try:
+            pairs, t = predict(
+                seq,
+                cuda,
+                t=Perf(len(seq), name),
+                out_sub=out_sub,
+                skip_struct=skip_struct,
+            )
+            print(t)
+
+            out_file_path = out_sub.joinpath(f"{name}.bpseq")
+            None if pairs is None else write_bpseq(seq, pairs, out_file_path)
+
+        except torch.OutOfMemoryError as e:
+            print(f"CUDA OOM for {name} of length {len(seq)}: ")
+            print(f"{e}")
+            gc.collect()
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
